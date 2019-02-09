@@ -1,0 +1,246 @@
+---
+title: "Producing caterpillar plots for univariate models"
+author: "Forest Hayes"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+
+---
+
+
+####The goal here is to produce caterpillar plots to compare univariate model results from two different sampling methods for three data sets. Since we have nine different covariates that means we have to run and plot a whopping 54 models.  Here I make  use of lists and apply functions in order to facilitate the process - hopefully I have also provided enough annotations to make it easy to follow.
+
+
+
+# 1. Running models
+
+Let's assume we already have our used and available points and the associated H.S.I. index values in a list of two for MCP and KDE.
+
+
+```{r, include = F}
+require(magrittr)                                     # load pipe opperator
+require(ggplot2)                                      # load ggplot
+load("wolfdata.rdat")
+```
+
+
+```{r, results = "asis"}
+wolf_data %>%                                         # look at the data
+purrr::map(~head(., n = 2) %>% knitr::kable(format = "markdown"))
+```
+
+<br>
+
+Since we need to run 54 different models, we can greatly facilitate the process by using lists and apply functions.
+
+First, lets make a function to run models and return a tidy dataframe as a result.
+
+```{r}
+
+# FUNCTION to produce tidy glm results
+tidy_glm <- function(data = data, x = x, y = y){
+  glm(                                                # GLM function
+    formula = as.formula(paste(y, "~", x, sep = " ")),  # specify glm formula
+    family = binomial(logit),                           # logit function
+    data = data                                         # specify data
+  ) %>% 
+  broom::tidy(exponentiate = T) %>%                   # tidy using broom
+  dplyr::slice(2)                                     # return only coefficients
+}
+
+```
+
+Now we can pass our data, and specify x and y arguments for the function. Note that we use <tt>broom::tidy()</tt> to produce a data frame of our covariate estimates and can use the argument <tt>exponentiate = T</tt> to convert the estimates from the log to probability scale. Cool!
+
+Lets test it out:
+
+```{r}
+
+tidy_glm(data = wolf_data$KDE, x = "Deer", y = "used") %>% 
+knitr::kable()
+
+```
+
+
+This is pretty good... but we really want to be able to give the function a whole data frame an get a list of results back so lets make another function that builds off the first one.
+
+```{r}
+# FUNCTION to apply tidy_glm() to each col of 'data' using a list of 'x' cols
+tidy_glms <- function(data = data, x = x, y = "used", model = "model"){
+  purrr::map(                                         # lapply
+    .f = tidy_glm,                                    # tidy glm function
+    .x = x,                                           # for each value of x
+    data = data,                                      
+    y = y                                             # for each (or 1) val of y 
+  ) %>% 
+  dplyr::bind_rows() %>%                              # bind rows of results
+  dplyr::mutate(model = model)                        # add column for 'model'
+}
+
+# Note that this function also has an argument to add a common column that 
+# specifies the model used to produce the data (in this case MCP or KDE).
+
+```
+
+<br>
+
+Let's get a list of the column names we want to analyze to use in our model.
+```{r}
+var_names <-
+  wolf_data$KDE %>%                                   # pass data
+  dplyr::select(-Pack, -used) %>%                     # remove grouping cols
+  colnames() %>%                                      # get colnames
+  as.list()                                           # cnvrt to list
+```
+
+
+And subset the data for each pack.
+```{r}
+red_deer_list <-  
+  wolf_data %>% 
+  purrr::map(~dplyr::filter(., Pack == "Red Deer")) 
+
+bow_valley_list <-
+  wolf_data %>% 
+  purrr::map(~dplyr::filter(., Pack == "Bow Valley")) 
+```
+
+
+And run the full set of models for each pack group.
+```{r, results = "hide"}
+
+# red deer pack model results
+red_deer_res <- 
+  purrr::map2(
+    .x = red_deer_list,
+    .y = list("KDE", "MCP"),
+    .f = function(df, model)
+      tidy_glms(data = df, x = var_names, y = "used", model = model)
+  ) %>% 
+  dplyr::bind_rows() 
+
+# bow valley pack model results
+bow_valley_res <- 
+  purrr::map2(
+    .x = bow_valley_list,
+    .y = list("KDE", "MCP"),
+    .f = function(df, model)
+      tidy_glms(data = df, x = var_names, y = "used", model = model)
+  ) %>% 
+  dplyr::bind_rows() 
+
+# combined pack model results
+combined_pack_res <- 
+  purrr::map2(
+    .x = wolf_data,
+    .y = list("KDE", "MCP"),
+    .f = function(df, model)
+      tidy_glms(data = df, x = var_names, y = "used", model = model)
+  ) %>% 
+  dplyr::bind_rows() 
+```
+
+
+# 2. Creating plots
+
+Now that we have the model results we can actually make some plots!  The <tt>dotwhisker</tt> package is a wrapper for <tt>ggplot</tt> that uses tidy model results to produce caterpillar plots. Lets look at one of our model sets to start.
+
+```{r}
+red_deer_res %>% 
+dotwhisker::dw_plot()
+```
+
+Pretty good! Let's tweak the aesthetics of the plot and wrap it into a function.
+```{r, results= "hide"}
+# FUNCTION to produce dot whisker plots
+boxwhiskerplot <- function(df, title = "Comparison of covariate estimates"){
+  df %>% 
+  dotwhisker::dw_plot(                                # create dot whisker plot
+    dodge_size = 0.7,
+    dot_args = list(shape = rep(c(15, 16), 9), size = 2.4),  # change dot shapes
+    whisker_args = list(size = 1)                            # whisker size
+  ) +
+  guides(                                             # change legend symbols
+    color = guide_legend(                          
+      override.aes = list(size = 5, shape = c(16, 15)))
+  ) +
+  theme_bw() +                                        # set theme to bw
+  ggtitle(title) +                                    # add title
+  xlab("Effect size") +
+  theme(                                              # modify theme
+    plot.title = element_text(                          
+      size = 12,                                        # title font size
+      face = "bold"                                     # bold text
+    ),
+    panel.grid.major = element_blank(),                 # remove major grids
+    panel.grid.minor = element_blank()                  # remove minor grids
+  ) +
+  scale_x_continuous(                                 # change xlim 
+    limits=c(0, 4.5),                                   # set limits
+    expand = c(0.01, 0.01)                              # padding past limits
+  ) +
+  geom_vline(                                         # add vertical line
+    xintercept = 1,                                     # at x= 1
+    lty = "dotted"                                      # line type
+  ) +
+  scale_color_manual(                                 # change color + label
+    labels = c("KDE", "MCP"),                           # labels
+    values = c("#e41a1c", "#377eb8")                    # colors
+  ) +
+  labs(color = "Method")                              # change legend title
+}
+```
+
+
+
+Now apply that function to each of the model result tables to produce  our plots.
+```{r}
+plot_list <-
+  purrr::map2(                                          
+    .x = list(                                        # list of pack data
+      combined_pack_res,
+      bow_valley_res,
+      red_deer_res),
+    .y = list(                                        # list of titles
+      "Comparison of covariate estimates for both wolf packs combined",
+      "Bow Valley wolf pack comparison of covariate estimates",
+      "Red Deer wolf pack comparison of covariate estimates"
+    ),
+  .f = function(df, title)
+    boxwhiskerplot(df, title)                         # plot function
+  )
+```
+
+
+Finally, let's put them into a single three part figure.
+
+```{r}
+out <-
+  ggpubr::ggarrange(                                    # arrange into grid
+    plotlist = plot_list,
+    common.legend = T,                                  # use a common legend
+    legend = "bottom",                                  # legend position
+    labels = "AUTO",                                    # label with LETTERS
+    ncol = 1,
+    nrow = 3
+  )
+```
+
+## Final product:
+
+<br>
+
+```{r, echo = F, fig.height = 8, fig.width = 8, fig.cap= "Figure 1: Comparison of logit link binomial regression coefficient estimates using kernel density home range estimates (KDE) and minimum convex polygon (MCP) estimates. For each species, the x-axis represents the an increase of H.S.I. value.  For DistHighHuman, DistHuman, and Elevation, a change on one on the x-axis represents an increase of 100 m. For each covariate the mean is plotted with 95% confidence intervals. A) shows model results for the combination of both packs. In this model, confidence intervals overlapped for all covariates.  B) shows the estimates for the Bow Valley Pack. Here, the KDE estimate was substantially higher for Wolf, Deer, and Elk than the MCP estimates. C) shows model results for the Red Deer pack. Estimates were more similar for this pack than the Bow Valley pack, however the KDE model still estimated larger effects for changes in Wolf, Deer, and Elk, H.S.I."}
+
+out
+```
+
+
+
+
+
+
+
+
+
+
